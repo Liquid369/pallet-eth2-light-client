@@ -5,6 +5,7 @@ use eth2_pallet_init::{init_pallet, substrate_pallet_client::EthClientPallet};
 use eth2_to_substrate_relay::eth2substrate_relay::Eth2SubstrateRelay;
 use lc_relay_config::RelayConfig;
 use lc_relayer_context::LightClientRelayerContext;
+use regex::Regex;
 use std::{path::PathBuf, sync::Arc};
 use subxt::ext::sp_core::Pair;
 use tokio::signal::unix;
@@ -36,10 +37,17 @@ pub async fn ignite_lc_relayer(ctx: LightClientRelayerContext) -> anyhow::Result
 		let api_client = Arc::new(api_client);
 		let pair = std::fs::read_to_string(&ctx.lc_init_config.path_to_signer_secret_key)
 			.expect("failed to read secret key");
+		let pair = parse_suri(&pair)
+			.expect("invalid key format");
 		let pair = subxt::ext::sp_core::sr25519::Pair::from_string(&pair, None);
 		let network = ctx.lc_relay_config.ethereum_network.as_typed_chain_id();
 		let mut eth_pallet = if let Ok(pair) = pair {
-			tracing::info!(target: "relay", "=== Initializing client with signer ===");
+			// Substrate default addr prefix
+			let pub_addr = pair.public().to_ss58check();
+			// GGX Prefix
+			let custom_prefix = Ss58AddressFormat::custom(8888);
+            let ggx_addr = AccountId32::from(pubkey).to_ss58check_with_version(custom_prefix);
+			tracing::info!(target: "relay", "Initializing client with signer: pub_addr = {}, ggx_addr = {}", pub_addr, ggx_addr);
 			EthClientPallet::new_with_pair(api_client, pair, network)
 		} else {
 			tracing::info!(target: "relay", "=== Initializing client without signer. Alice used as default ===");
@@ -135,6 +143,18 @@ pub async fn start_gadget(relayer_params: Eth2LightClientParams) {
 	}
 }
 
+pub async fn clean_suri(suri: &str) -> Option<String> {
+	// If formatting has some hidden chars, new lines, extra spaces clean it up
+	let cleaned_suri = suri.replace("\"", "").replace("\n", "").trim().to_string();
+	// Regex to make sure we meet suri standards
+	let re = Regex::new(r"^(0x[0-9a-fA-F]{64})|([a-zA-Z]+(?:\s+[a-zA-Z]+)*)(/[\d'/]+)?(///\S+)?$").unwrap();
+	re.captures(&cleaned_input).map(|caps| {
+        caps.iter()
+            .skip(1) 
+            .filter_map(|m| m.map(|m| m.as_str().trim())) // Convert matches to strings, trim them
+            .collect::<String>() // Concatenate all valid groups into a single String
+    })
+}
 /// Loads the configuration for the light client
 fn loads_light_client_relayer_config(config_path: &PathBuf) -> anyhow::Result<RelayConfig> {
 	Ok(RelayConfig::load_from_toml(config_path.clone()))
